@@ -20,7 +20,7 @@ import traceback
 # CONFIGURAÇÃO DO ARQUIVO DE DADOS
 # ==============================================================================
 SEPARADOR_CSV = ';'
-caminho_csv = "C:\\Users\\mateu\\Documents\\Projetos\\ProjetodeOficinadeIntegracao\\melhores_mapeamento\\melhores_mapeamento\\dados_1.csv"
+caminho_csv = "C:\\Users\\mateu\\Documents\\Projetos\\ProjetodeOficinadeIntegracao\\melhores_mapeamento\\melhores_mapeamento\\dados113.csv"
 # Mapeamento das colunas curtas do CSV novo (conforme notebook atualizado)
 # Mantém os nomes originais como chaves para facilitar consulta.
 COLUNAS_NOVO_FORMATO = {
@@ -1603,10 +1603,10 @@ if __name__ == '__main__':
     
     #VisualizadorGraficos(dados=None, dados_original=None, calc=None)
     try:
-        dados, dados_original, calc, csv_usado = carregar_csv_de_teste(caminho_csv)
-        print(f"Usando CSV de teste: {csv_usado}")
-        VisualizadorGraficos(dados=dados, dados_original=dados_original, calc=calc)
+       dados, dados_original, calc, csv_usado = carregar_csv_de_teste(caminho_csv)
+       print(f"Usando CSV de teste: {csv_usado}")
+       VisualizadorGraficos(dados=dados, dados_original=dados_original, calc=calc)
     except Exception as e:
-        print(f"Não foi possível carregar CSV de teste: {e}")
-        print("Iniciando o app sem dados. Use '📥 Receber do ESP32' para carregar um CSV via Wi-Fi.")
-        VisualizadorGraficos(dados=None, dados_original=None, calc=None)
+       print(f"Não foi possível carregar CSV de teste: {e}")
+       print("Iniciando o app sem dados. Use '📥 Receber do ESP32' para carregar um CSV via Wi-Fi.")
+       VisualizadorGraficos(dados=None, dados_original=None, calc=None)
