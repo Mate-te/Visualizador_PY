@@ -9,7 +9,9 @@ import struct
 import tkinter as tk
 import tkinter.simpledialog as sd
 import tkinter.messagebox as mb
+import tkinter.filedialog as fd
 import scipy.ndimage as ndimage
+from datetime import datetime
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import inspect
 import threading
@@ -20,7 +22,7 @@ import traceback
 # CONFIGURAÇÃO DO ARQUIVO DE DADOS
 # ==============================================================================
 SEPARADOR_CSV = ';'
-caminho_csv = "C:\\Users\\mateu\\Documents\\Projetos\\ProjetodeOficinadeIntegracao\\melhores_mapeamento\\melhores_mapeamento\\dados113.csv"
+caminho_csv = "C:\\Users\\mateu\\Documents\\Projetos\\ProjetodeOficinadeIntegracao\\melhores_mapeamento\\melhores_mapeamento\\dados154.csv"
 # Mapeamento das colunas curtas do CSV novo (conforme notebook atualizado)
 # Mantém os nomes originais como chaves para facilitar consulta.
 COLUNAS_NOVO_FORMATO = {
@@ -1273,8 +1275,10 @@ class VisualizadorGraficos:
             with socket.create_connection((ip, porta), timeout=5) as s:
                 s.sendall(pacote)
 
-                # Aguarda confirmação do ESP32 (4 bytes: número de pontos recebidos)
-                resposta = s.recv(4)
+                # Aguarda confirmação do ESP32 (4 bytes: número de pontos recebidos).
+                # Usa _recv_all para juntar exatamente 4 bytes: TCP não preserva
+                # fronteiras, então um recv() isolado poderia devolver menos.
+                resposta = self._recv_all(s, 4)
                 if len(resposta) == 4:
                     n_confirmado = struct.unpack('<I', resposta)[0]
                     if n_confirmado == n:
@@ -1336,15 +1340,35 @@ class VisualizadorGraficos:
                               fg="#facc15", bg="#1e1e1e", wraplength=460)
         lbl_status.pack(pady=(6, 0), padx=10)
 
-        btn_receber = tk.Button(dialogo, text="📥 Receber do ESP32",
+        btn_receber = tk.Button(dialogo, text="📥 Conectar e receber",
                                 font=("Arial", 12, "bold"), bg="#b45309", fg="white",
                                 activebackground="#92400e", activeforeground="white",
                                 padx=16, pady=6)
         btn_receber.pack(pady=10)
 
+        # Sinaliza para o loop de recepção parar (botão Parar).
+        parar_evento = threading.Event()
+
         def adicionar_linha(linha):
             txt_linhas.insert("end", linha + "\n")
             txt_linhas.see("end")
+            # Contador leve no status para acompanhar a chegada de dados.
+            var_status.set(
+                f"Porta aberta, drenando... {int(txt_linhas.index('end-1c').split('.')[0]) - 1} linhas. "
+                "Clique em Parar para finalizar."
+            )
+
+        def restaurar_botao():
+            btn_receber.config(state="normal", text="📥 Conectar e receber",
+                               bg="#b45309", activebackground="#92400e",
+                               command=ao_receber)
+
+        def ao_parar():
+            # Não fecha a conexão bruscamente: apenas sinaliza o loop, que
+            # drena a sobra e encerra de forma limpa.
+            parar_evento.set()
+            btn_receber.config(state="disabled", text="Encerrando...")
+            var_status.set("Encerrando recepção e carregando o que foi recebido...")
 
         def ao_receber():
             ip = var_ip.get().strip()
@@ -1354,7 +1378,11 @@ class VisualizadorGraficos:
                 var_status.set("Porta inválida.")
                 return
 
-            btn_receber.config(state="disabled", text="Recebendo...")
+            parar_evento.clear()
+            # O botão vira "Parar": a porta fica aberta e drenando até você
+            # clicar (ou até o ESP fechar / chegar BT_END).
+            btn_receber.config(text="⏹ Parar e carregar", bg="#b91c1c",
+                               activebackground="#7f1d1d", command=ao_parar)
             var_status.set(f"Conectando em {ip}:{porta}...")
             txt_linhas.delete("1.0", "end")
             lbl_status.config(fg="#facc15")
@@ -1363,15 +1391,22 @@ class VisualizadorGraficos:
             def tarefa():
                 sucesso, resultado = self._receber_csv_wifi(
                     ip, porta,
-                    callback=lambda l: dialogo.after(0, adicionar_linha, l)
+                    callback=lambda l: dialogo.after(0, adicionar_linha, l),
+                    stop_event=parar_evento,
                 )
                 if sucesso:
                     linhas = resultado
+                    # Salva o CSV recebido no computador antes de carregar no app
+                    caminho_salvo, erro_salvamento = self._salvar_csv_recebido(linhas)
                     # Carrega as linhas como DataFrame e atualiza o app
                     ok, msg = self._carregar_csv_das_linhas(linhas)
                     if ok:
-                        dialogo.after(0, lambda: var_status.set(
-                            f"✔ {len(linhas)} linhas recebidas e carregadas!\nGráficos prontos."))
+                        mensagem = f"✔ {len(linhas)} linhas recebidas e carregadas!\nGráficos prontos."
+                        if caminho_salvo:
+                            mensagem += f"\nArquivo salvo em: {caminho_salvo}"
+                        elif erro_salvamento:
+                            mensagem += f"\nAviso: {erro_salvamento}"
+                        dialogo.after(0, lambda: var_status.set(mensagem))
                         dialogo.after(0, lambda: lbl_status.config(fg="#4ade80"))
                         dialogo.after(2000, dialogo.destroy)
                     else:
@@ -1380,12 +1415,41 @@ class VisualizadorGraficos:
                 else:
                     dialogo.after(0, lambda: var_status.set(f"✖ {resultado}"))
                     dialogo.after(0, lambda: lbl_status.config(fg="#f87171"))
-                dialogo.after(0, lambda: btn_receber.config(
-                    state="normal", text="📥 Receber do ESP32"))
+                dialogo.after(0, restaurar_botao)
 
             threading.Thread(target=tarefa, daemon=True).start()
 
         btn_receber.config(command=ao_receber)
+
+    def _filtrar_linhas_csv(self, linhas):
+        """Remove marcadores do protocolo BT e deixa apenas o conteúdo CSV."""
+        return [l for l in linhas
+                if not l.startswith('BT_START') and not l.startswith('BT_END:')]
+
+    def _salvar_csv_recebido(self, linhas):
+        """Salva o CSV recebido em um arquivo local no computador."""
+        try:
+            linhas_csv = self._filtrar_linhas_csv(linhas)
+            if not linhas_csv:
+                return None, "Nenhum conteúdo CSV válido para salvar."
+
+            pasta_downloads = os.path.join(os.path.expanduser("~"), "Downloads")
+            pasta_destino = os.path.join(pasta_downloads, "csv_recebidos_esp32")
+            os.makedirs(pasta_destino, exist_ok=True)
+
+            nome_base = f"dados_esp32_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            caminho = os.path.join(pasta_destino, f"{nome_base}.csv")
+            contador = 1
+            while os.path.exists(caminho):
+                caminho = os.path.join(pasta_destino, f"{nome_base}_{contador}.csv")
+                contador += 1
+
+            with open(caminho, 'w', encoding='utf-8', newline='') as arquivo:
+                arquivo.write('\n'.join(linhas_csv))
+
+            return caminho, None
+        except Exception as e:
+            return None, f"Erro ao salvar arquivo: {e}"
 
     def _carregar_csv_das_linhas(self, linhas):
         """
@@ -1394,10 +1458,7 @@ class VisualizadorGraficos:
         se o arquivo tivesse sido lido do disco.
         """
         try:
-            # Filtra marcadores do protocolo BT
-            linhas_csv = [l for l in linhas
-                          if not l.startswith('BT_START') and not l.startswith('BT_END:')]
-
+            linhas_csv = self._filtrar_linhas_csv(linhas)
             texto = '\n'.join(linhas_csv)
             dados_original = pd.read_csv(io.StringIO(texto), sep=SEPARADOR_CSV)
             dados = pd.read_csv(io.StringIO(texto), sep=SEPARADOR_CSV)
@@ -1417,39 +1478,98 @@ class VisualizadorGraficos:
         except Exception as e:
             return False, str(e)
 
-    def _receber_csv_wifi(self, ip, porta=5001, callback=None):
-     
+    def _receber_csv_wifi(self, ip, porta=5001, callback=None,
+                          stop_event=None, poll_intervalo=1.0):
+        """Abre a conexão TCP na porta do ESP32 e DRENA o socket continuamente.
+
+        O ESP32 é uma ponte Bluetooth(STM) -> Wi-Fi/TCP(app). Ele repassa os
+        bytes crus do STM em blocos de até 1024 bytes, sem preservar fronteiras
+        de mensagem: um recv() pode trazer meia linha ou várias linhas de uma
+        vez. Por isso acumulamos tudo em `buf` e só emitimos linhas terminadas
+        em '\\n', guardando a sobra parcial para o próximo recv.
+
+        Objetivo deste método: manter a porta aberta e ler o mais rápido
+        possível, para o buffer TCP de saída do ESP nunca encher. Se ele
+        enchesse, o ESP pararia de puxar bytes do Bluetooth do STM
+        (back-pressure) e dados seriam perdidos. Por isso:
+
+        - O timeout do recv NÃO encerra a recepção; ele serve só para acordar
+          periodicamente e checar `stop_event`. Em silêncio, a porta continua
+          aberta drenando.
+        - Um buffer de recepção grande no SO (SO_RCVBUF) absorve rajadas.
+
+        A recepção só termina quando: o ESP fecha a conexão (recv vazio), chega
+        o sentinela 'BT_END:', ou `stop_event` é acionado (botão Parar). Em
+        todos os casos a sobra final em `buf` (última linha, que pode vir sem
+        '\\n') é processada.
+        """
 
         linhas = []
+
+        def _emitir(linha_bytes):
+            """Decodifica, limpa e registra uma linha. Retorna True se for o
+            sentinela de fim de transmissão (BT_END:)."""
+            linha = linha_bytes.decode('utf-8', errors='replace').strip()
+            if not linha:
+                return False
+            linhas.append(linha)
+            if callback:
+                callback(linha)
+            return linha.startswith('BT_END:')
+
         try:
-            with socket.create_connection((ip, porta), timeout=30) as s:
-                s.settimeout(30)
+            # timeout curto aqui vale só para o connect(); depois trocamos para
+            # o modo "drenar continuamente".
+            with socket.create_connection((ip, porta), timeout=15) as s:
+                # Buffer de recepção grande no SO: absorve rajadas do ESP e dá
+                # folga para o app não gerar back-pressure sobre o STM->ESP.
+                try:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+                except OSError:
+                    pass
+                # Timeout curto: NÃO é fim de dados, é só o intervalo em que
+                # acordamos para checar o botão Parar.
+                s.settimeout(poll_intervalo)
+
                 buf = b''
                 while True:
-                    chunk = s.recv(1024)
+                    # Parada manual (botão): drena a sobra e encerra.
+                    if stop_event is not None and stop_event.is_set():
+                        _emitir(buf)
+                        return True, linhas
+
+                    try:
+                        chunk = s.recv(4096)
+                    except socket.timeout:
+                        # Nenhum dado neste intervalo. A porta segue aberta e
+                        # continuamos drenando: nada é perdido.
+                        continue
+
                     if not chunk:
+                        # ESP32 fechou a conexão: processa a sobra como última
+                        # linha (caso tenha vindo sem '\n' no final).
+                        _emitir(buf)
                         break
+
                     buf += chunk
+                    # Processa apenas linhas COMPLETAS; a sobra parcial (após o
+                    # último '\n') fica em `buf` para o próximo recv.
                     while b'\n' in buf:
                         linha_bytes, buf = buf.split(b'\n', 1)
-                        linha = linha_bytes.decode('utf-8', errors='replace').strip()
-                        if not linha:
-                            continue
-                        linhas.append(linha)
-                        if callback:
-                            callback(linha)
-                        if linha.startswith('BT_END:'):
+                        if _emitir(linha_bytes):
                             return True, linhas
 
             return True, linhas
 
         except TimeoutError:
+            # Só ocorre no connect(): não conseguiu abrir a conexão a tempo.
+            return False, f"Não foi possível conectar em {ip}:{porta} (timeout)."
+        except ConnectionRefusedError:
+            return False, f"Conexão recusada. ESP32 está ouvindo na porta {porta}?"
+        except OSError as e:
+            # Se já recebemos algo, não descarta: entrega o que veio.
             if linhas:
                 return True, linhas
-            return False, "Timeout. ESP32 não enviou dados em 30 segundos."
-        except ConnectionRefusedError:
-            return False, "Conexão recusada. ESP32 está ouvindo na porta 5001?"
-        except OSError as e:
             return False, f"Erro de rede: {e}"
 
     def _recv_all(self, conn, n_bytes):
